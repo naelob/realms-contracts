@@ -34,6 +34,8 @@ from openzeppelin.introspection.erc165.library import ERC165
 
 from contracts.token.library import ERC1155
 
+from starkware.cairo.common.bool import TRUE, FALSE
+
 struct CallOption {
     Writer : felt,
     VaultAddress : felt,
@@ -41,7 +43,8 @@ struct CallOption {
     Strike : felt,
     Premium : felt,
     Underlying : felt,
-    AssetId ; felt,
+    AssetId : felt,
+    Settled : felt
 }
 
 struct SettleType {
@@ -58,6 +61,24 @@ func CallOptionOpened(
     expiration_time : felt,
     token_address : felt,
     token_id : felt
+) {
+}
+
+@event
+func CallOptionBurned(
+    option_id : felt,
+) {
+}
+
+@event
+func CallOptionReclaimed(
+    option_id : felt,
+) {
+}
+
+@event
+func MarketPaused(
+    bool : felt
 ) {
 }
 
@@ -133,8 +154,9 @@ func write{} (
     token_address : felt,
     token_id : felt,
     strike : felt,
-    expiration_time : felt
+    expiration_time : felt,
 ) {
+    alloc_locals;
     let (paused) = assert_not_paused();
     with_attr error_message("Covered_Call : Not Paused") {
         assert paused = FALSE;
@@ -159,8 +181,6 @@ func write{} (
 
     let (count) = options_counter.read();
 
-    // TODO : determine the right premium price for the ERC1155 being sent into the contract
-
     let (this_address) = get_contract_address();
     let (vault_address) = vault_address.read();
     // Transfer the ERC1155 underlying into our contract
@@ -177,12 +197,25 @@ func write{} (
     let premium : felt;
     let (settle_type) = settle_type.read();
     if (settle_type == SettleType.Auction) { 
+        // we'll use an auction system where users can start bidding one day before expiration
+        // The starting bid will be set at the strike price + 5% for e.g
         premium = strike;
     } else {
-
+        // Spot so we must give the nft option contract a fair price maybe Black Scholes ? 
+        // TODO : determine the right premium price for the ERC1155 being sent into the contract
+        premium = 200;
     }
-    
-
+ 
+    local option_info : CallOption = CallOption(    
+        caller,
+        vault_address,
+        expiration_time,
+        strike,
+        premium,
+        token_address,
+        token_id,
+        FALSE
+    )
     options_contracts_list.write(count, option_info);
 
     // Add our option tied to the token_id of the ERC1155
@@ -202,24 +235,128 @@ func write{} (
 
 @external 
 func settle{}(
+    option_id : felt
 ) {
+    let (settle_type) = settle_type.read();
+    if (settle_type == SettleType.Auction) { 
+        return _settle_auction(option_id);
+    }else {
+        return _settle_spot(option_id);
+    }
 }
 
 @external
-func reclaim_uynderlying{}(
+func reclaim_underlying{}(
+    option_id : felt
 ) {
-}
+    alloc_locals;
+    let (caller) = get_caller_address();
+    let (option_info : CallOption) = options_contracts_list.read(option_id);
+    with_attr error_message("Covered_Call : Only Writer Allowed") {
+        assert caller == option_info.Writer;
+    }
+    let (is_settled) = option_info.Settled;
+    with_attr error_message("Covered_Call : Option Already Settled") {
+        assert is_settled == FALSE;
+    }
+    let (nft_address) = nft_address.read();
+    let (owner) = IERC721.owner_of(nft_address, option_id);
+    with_attr error_message("Covered_Call : Not The Owner of the Option Contract") {
+        assert owner == caller;
+    }
+
+    with_attr error_message("Covered_Call : Option Expired") {
+        let (timestamp) = get_block_timestamp();
+        assert_lt(timestamp, option_info.Expiration);
+    }
+
+    //burn the option NFT 
+    IERC721._burn(nft_address, option_id);
+
+
+    // settle the option to TRUE
+  
+    local new_option_info : CallOption = CallOption(
+        option_info.Writer,
+        option_info.VaultAddress,
+        option_info.Expiration,
+        option_info.Strike,
+        option_info.Premium,
+        option_info.Underlying,
+        option_info.AssetId,
+        TRUE
+    )
+    options_contracts_list.write(option_id, new_option_info);
+
+
+    IVault.release_underlying(option_info.VaultAddress, option_info.AssetId, option_info.Writer);
+
+    CallOptionReclaimed.emit(option_id);
+    return ();
+}   
+
 
 @external
 func burn_expired_option{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
     
 ) {
+    alloc_locals;
+    let (option_info : CallOption) = options_contracts_list.read(option_id);
+
+    with_attr error_message("Covered_Call : Option Not Expired") {
+        let (timestamp) = get_block_timestamp();
+        assert_lt(option_info.Expiration, timestamp);
+    }
+
+    let (is_settled) = option_info.Settled;
+    with_attr error_message("Covered_Call : Option Already Settled") {
+        assert is_settled == FALSE;
+    }
+
+    // TODO : check if settle type is Auction, and make sure no actual bids are present
+
+
+    let (nft_address) = nft_address.read();
+    //burn the option NFT 
+    IERC721._burn(nft_address, option_id);
     
+    local new_option_info : CallOption = CallOption(
+        option_info.Writer,
+        option_info.VaultAddress,
+        option_info.Expiration,
+        option_info.Strike,
+        option_info.Premium,
+        option_info.Underlying,
+        option_info.AssetId,
+        TRUE
+    )
+    options_contracts_list.write(option_id, new_option_info);
+
+    CallOptionBurned.emit(option_id);
+    return ();
 }
-func 
+
 // Internal
 
-func _new_contract{}() -> (option_id : felt){
+func _settle_auction{}(option_id : felt){
+
+}
+
+func _settle_spot{}(option_id : felt){
+
+}
+
+func set_market_paused{}(
+    bool : felt
+){  
+    Ownable.assert_only_owner();
+
+    with_attr error_message("Covered_Call : Already Paused") {
+        let (is_paused) = assert_not_paused();
+        assert is_paused == FALSE;
+    }
+    market_paused.write(TRUE);
+    MarketPaused.emit(bool);
 }
 
 // Modifiers
