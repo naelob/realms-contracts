@@ -44,6 +44,11 @@ struct CallOption {
     AssetId ; felt,
 }
 
+struct SettleType {
+    Auction : felt,
+    Spot : felt
+}
+
 @event
 func CallOptionOpened(
     option_id : felt,
@@ -83,6 +88,9 @@ func options_contracts_list(idx : felt) -> (call_option : CallOption) {
 func assets_to_options(vault_address : felt, token_id : felt) -> (call_option : CallOption) {
 }
 
+@storage_var
+func settle_type() -> (res: felt) {
+}
 
 @storage_var
 func market_paused() -> (bool: felt) {
@@ -94,7 +102,8 @@ func initializer{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr
     proxy_admin : felt,
     currency_address_ : felt,
     vault_address_ : felt,
-    nft_contract_adress_ : felt
+    nft_contract_adress_ : felt,
+    settle_type_ : felt
 ) {
     currency_address.write(currency_address_);
     vault_address.write(vault_address_);
@@ -103,6 +112,7 @@ func initializer{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr
     Ownable.initializer(proxy_admin);
     market_paused.write(FALSE);
     options_counter.wirte(1);
+    settle_type.write(settle_type_);
     return ();
 }
 
@@ -118,7 +128,7 @@ func upgrade{}(
 
 /// Option Writer Functions ///
 
-
+@external
 func write{} (
     token_address : felt,
     token_id : felt,
@@ -129,6 +139,13 @@ func write{} (
     with_attr error_message("Covered_Call : Not Paused") {
         assert paused = FALSE;
     }
+
+    // make sure a settlement type is written in storage
+    let (is_set) = assert_settlement();
+    with_attr error_message("Covered_Call : Settle Type Not Set") {
+        assert_not_zero(is_set);
+    }
+
     let (caller) = get_caller_address();
 
     // ensure at least 24h is set for expiration
@@ -157,17 +174,14 @@ func write{} (
 
     
     options_counter.write(count + 1);
+    let premium : felt;
+    let (settle_type) = settle_type.read();
+    if (settle_type == SettleType.Auction) { 
+        premium = strike;
+    } else {
 
-    // add the new option contract to the opened contracts list
-    local option_info : CallOption = CallOption(
-        caller,
-        vault_address,
-        expiration_time,
-        strike,
-        ,
-        token_address,
-        token_id
-    );
+    }
+    
 
     options_contracts_list.write(count, option_info);
 
@@ -183,8 +197,26 @@ func write{} (
         token_address,
         token_id
     );
+    return ();
 }
 
+@external 
+func settle{}(
+) {
+}
+
+@external
+func reclaim_uynderlying{}(
+) {
+}
+
+@external
+func burn_expired_option{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
+    
+) {
+    
+}
+func 
 // Internal
 
 func _new_contract{}() -> (option_id : felt){
@@ -195,4 +227,16 @@ func _new_contract{}() -> (option_id : felt){
 func assert_not_paused{}() -> (paused : felt){
     let (paused) = market_paused.read();
     return paused;
+}
+func assert_settlement{}() -> (res : felt) {
+    let (type) = settle_type.read();
+    assert_not_zero(type);
+    if (type == SettleType.Auction) {
+        return 1;
+    }
+    
+    if (type == SettleType.Spot) {
+        return 1;
+    } 
+    return 0;
 }
