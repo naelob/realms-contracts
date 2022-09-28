@@ -90,6 +90,12 @@ func CallOptionSettledBySpot(
 }
 
 @event
+func OptionBought(
+    option_id : felt
+){
+}
+
+@event
 func Bid(
     option_id : felt, bid_amount : felt, bidder : felt
 ){
@@ -142,6 +148,11 @@ func settle_type() -> (res: felt) {
 }
 
 @storage_var
+func auction_start_period() -> (res: felt) {
+}
+
+
+@storage_var
 func market_paused() -> (bool: felt) {
 }
 
@@ -157,7 +168,8 @@ func initializer{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr
     vault_address_ : felt,
     nft_contract_adress_ : felt,
     settle_type_ : felt,
-    min_above_bid_alpha_ : felt
+    min_above_bid_alpha_ : felt,
+    auction_start_period_ : felt
 ) {
     currency_address.write(currency_address_);
     vault_address.write(vault_address_);
@@ -168,6 +180,7 @@ func initializer{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr
     options_counter.wirte(1);
     settle_type.write(settle_type_);
     min_above_bid_alpha.write(min_above_bid_alpha_);
+    auction_start_period.write(auction_start_period_);
     return ();
 }
 
@@ -273,6 +286,8 @@ func write{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr} (
 func bid{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
     option_id : felt, bid_amount : felt
 ) {
+    assert_bid_is_enabled(option_id);
+
     let (caller) = get_caller_address();
     let (currency_address) = currency_address.read();
     let (balance_LORDS) = IERC20.balanceOf(currency_address, caller);
@@ -308,6 +323,18 @@ func bid{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
 
     return ();
 
+}
+
+@external
+func buy{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
+    option_id : felt
+) {
+    // TODO 
+    let (caller) = get_caller_address();
+    // Maybe it would be better to calc the premium here
+    // as time may have passed since the emission of the option from the writer side
+    // TODO : dont forget to remove the premium price set inside write func
+    OptionBought.emit(option_emit, caller);
 }
 @external 
 func settle{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
@@ -560,13 +587,11 @@ func _settle_spot{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_pt
         IERC20.transferFrom(currency_address, owner_of_option_contract, option_info.Writer, [option_info.Strike]); 
         // give ownership of underlying ERC1155 resource to the holder of the option
         IVault.set_new_asset_owner(option_info.VaultAddress, option_info.AssetId, caller);
-        
-        // tocheck IERC721._burn(nft_address, option_id);
-        CallOptionSettledBySpot.emit(option_id);
-        return ();
     }
 
     // option is worthless : so we burn it ? 
+    IERC721._burn(nft_address, option_id);
+    CallOptionSettledBySpot.emit(option_id);
     return ();
 }
 
@@ -602,6 +627,29 @@ func _set_market_paused{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_ch
 }
 
 // Modifiers
+
+func assert_bid_is_enabled{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
+    option_id : felt
+){  
+    let (option_info : CallOption) = options_contracts_list.read(option_id);
+
+    with_attr error_message("Covered_Call : Option Expired") {
+        let (timestamp) = get_block_timestamp();
+        assert_lt(timestamp, option_info.Expiration);
+    }
+
+    let (auction_start_period) = auction_start_period.read();
+    let (diff) =  option_info.Expiration - auction_start_period;
+    with_attr error_message("Covered_Call : You Can Only Bid On Last Day") {
+        let (timestamp) = get_block_timestamp();
+        assert_lt(diff, timestamp);
+    }
+
+    let (is_settled) = option_info.Settled;
+    with_attr error_message("Covered_Call : Option Already Settled") {
+        assert is_settled == FALSE;
+    }
+}   
 
 func assert_not_paused{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}() -> (paused : felt){
     let (paused) = market_paused.read();
