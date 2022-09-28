@@ -36,12 +36,15 @@ from contracts.token.library import ERC1155
 
 from starkware.cairo.common.bool import TRUE, FALSE
 
+from contracts.options_market.interfaces.IBlackScholes import IBlackScholes
+from contracts.options_market.interfaces.IExhangeAMM import IExhangeAMM
+
+
 struct CallOption {
     Writer : felt,
     VaultAddress : felt,
     Expiration : felt,
     Strike : felt,
-    Premium : felt,
     Underlying : felt,
     AssetId : felt,
     Settled : felt
@@ -91,7 +94,7 @@ func CallOptionSettledBySpot(
 
 @event
 func OptionBought(
-    option_id : felt
+    option_id : felt, premium : felt
 ){
 }
 
@@ -100,7 +103,6 @@ func Bid(
     option_id : felt, bid_amount : felt, bidder : felt
 ){
 }
-
 
 @event
 func MarketPaused(
@@ -126,7 +128,6 @@ func underlying_token_address() -> (res: felt) {
 func nft_address() -> (res: felt) {
 }
 
-
 @storage_var
 func options_counter() -> (res: felt) {
 }
@@ -138,10 +139,10 @@ func options_contracts_list(idx : felt) -> (call_option : CallOption) {
 @storage_var
 func assets_to_options(vault_address : felt, token_id : felt) -> (call_option : CallOption) {
 }
+
 @storage_var
 func option_claims(option_id : felt) -> (amount_claimable: felt) {
 }
-
 
 @storage_var
 func settle_type() -> (res: felt) {
@@ -151,7 +152,6 @@ func settle_type() -> (res: felt) {
 func auction_start_period() -> (res: felt) {
 }
 
-
 @storage_var
 func market_paused() -> (bool: felt) {
 }
@@ -159,6 +159,11 @@ func market_paused() -> (bool: felt) {
 @storage_var
 func min_above_bid_alpha() -> (res: felt) {
 }
+
+@storage_var
+func black_scholes_address() -> (res: felt) {
+}
+
 
 
 @external
@@ -169,7 +174,9 @@ func initializer{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr
     nft_contract_adress_ : felt,
     settle_type_ : felt,
     min_above_bid_alpha_ : felt,
-    auction_start_period_ : felt
+    auction_start_period_ : felt,
+    black_scholes_address_ : felt,
+    exchange_amm_address : felt
 ) {
     currency_address.write(currency_address_);
     vault_address.write(vault_address_);
@@ -181,6 +188,8 @@ func initializer{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr
     settle_type.write(settle_type_);
     min_above_bid_alpha.write(min_above_bid_alpha_);
     auction_start_period.write(auction_start_period_);
+    black_scholes_address.write(black_scholes_address_);
+    exchange_amm_address.write(exchange_amm_address_);
     return ();
 }
 
@@ -241,24 +250,12 @@ func write{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr} (
 
     
     options_counter.write(count + 1);
-    let premium : felt;
-    let (settle_type) = settle_type.read();
-    if (settle_type == SettleType.Auction) { 
-        // we'll use an auction system where users can start bidding one day before expiration
-        // The starting bid will be set at the strike price + 5% for e.g
-        premium = strike;
-    } else {
-        // Spot so we must give the nft option contract a fair price maybe Black Scholes ? 
-        // TODO : determine the right premium price for the ERC1155 being sent into the contract
-        premium = 200;
-    }
  
     local option_info : CallOption = CallOption(    
         caller,
         vault_address,
         expiration_time,
         strike,
-        premium,
         token_address,
         token_id,
         FALSE,
@@ -329,12 +326,43 @@ func bid{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
 func buy{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
     option_id : felt
 ) {
-    // TODO 
+    alloc_locals;
     let (caller) = get_caller_address();
     // Maybe it would be better to calc the premium here
     // as time may have passed since the emission of the option from the writer side
-    // TODO : dont forget to remove the premium price set inside write func
-    OptionBought.emit(option_emit, caller);
+
+    let (currency_address) = currency_address.read();
+    let (this_address)  = get_contract_address();
+    let (nft_address) = nft_address.read();
+
+    let (option_info : CallOption) = options_contracts_list.read(option_id);
+
+    // maybe to change via DAO, but by default option writer cant bid its own option creation
+    with_attr error_message("Covered_Call : Writer Cannot Buy Its Own Contract") {
+        assert_not_equal(caller, option_info.Writer);
+    }
+    let (bs_address) = black_scholes_address.read();
+    let (spot_price_resource) = _get_spot_price(option_info.AssetId);
+
+    // TODO : pad each value to 27 digits and normalize expiration on annual basis
+    // we assume for sake of simplicity 
+    // - IR to 0%
+    // - Volatitlity to 20
+    let (local call_option_price, _) = IBlackScholes.option_prices(
+        bs_address,
+        option_info.Expiration,
+        200000000000000000000000000,
+        spot_price_resource,
+        option_info.Strike,
+        00000000000000000000000000
+    );
+
+    IERC20.transferFrom(currency_address, caller, this_address, [call_option_price]);
+
+    let (owner) = IERC721.owner_of(nft_address, option_id);
+    IERC721.transferFrom(nft_address, owner, caller, option_id);
+
+    OptionBought.emit(option_emit, caller, call_option_price);
 }
 @external 
 func settle{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
@@ -384,7 +412,6 @@ func reclaim_underlying{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_ch
         option_info.VaultAddress,
         option_info.Expiration,
         option_info.Strike,
-        option_info.Premium,
         option_info.Underlying,
         option_info.AssetId,
         TRUE,
@@ -427,6 +454,7 @@ func claim_option_earnings{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range
 
 @external
 func burn_expired_option{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(  
+    option_id : felt
 ) {
     alloc_locals;
     let (option_info : CallOption) = options_contracts_list.read(option_id);
@@ -453,7 +481,6 @@ func burn_expired_option{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_c
         option_info.VaultAddress,
         option_info.Expiration,
         option_info.Strike,
-        option_info.Premium,
         option_info.Underlying,
         option_info.AssetId,
         TRUE,
@@ -494,7 +521,6 @@ func _settle_auction{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check
         option_info.VaultAddress,
         option_info.Expiration,
         option_info.Strike,
-        option_info.Premium,
         option_info.Underlying,
         option_info.AssetId,
         TRUE,
@@ -555,7 +581,6 @@ func _settle_spot{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_pt
         option_info.VaultAddress,
         option_info.Expiration,
         option_info.Strike,
-        option_info.Premium,
         option_info.Underlying,
         option_info.AssetId,
         TRUE,
@@ -598,9 +623,14 @@ func _settle_spot{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_pt
 
 func _get_spot_price{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
     asset_id : felt
-) {
-    // TODO : call the get_all_rates([asset_id], [1]) function inside Exchange AMM btwn ERC1155 <> LORDS
+) -> (res : felt) {
+    let (exchange_amm_address) = exchange_amm_address.read();
+    local TOKEN_ID : Uint256 = Uint256(asset_id,0);
+    // get prices from amm exchange for ERC1155 resource
+    let (prices, prices_len) = IExhangeAMM.get_all_rates(exchange_amm_address, 1, [TOKEN_ID], 1, [Uint256(1,0)]);
+    return (res=[prices]);
 }
+
 func _send_last_bid_to_previous_winner{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
     call_option : CallOption
 ){
@@ -651,11 +681,13 @@ func assert_bid_is_enabled{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range
     }
 }   
 
-func assert_not_paused{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}() -> (paused : felt){
+func assert_not_paused{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
+) -> (paused : felt){
     let (paused) = market_paused.read();
     return (paused);
 }
-func assert_settlement{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}() -> (res : felt) {
+func assert_settlement{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
+) -> (res : felt) {
     let (type) = settle_type.read();
     assert_not_zero(type);
     if (type == SettleType.Auction) {
