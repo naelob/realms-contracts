@@ -283,6 +283,7 @@ func write{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr} (
     // Mint an NFT ERC721 to the writer of the option
     // This ERC721 would represent the option contract held by the writer, can be traded on the NFT marketplace
     let (nft_address) = nft_address.read();
+    local null : Uint256* = alloc();
     IERC721._safeMint(nft_address, writer, count, 0, null);
 
     let next_count : Uint256 = uint256_add(count, Uint256(1,0));
@@ -539,17 +540,21 @@ func onERC1155Received{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_che
     // [data + 1] => token_address
     // [data + 2] => token_id
 
-    // TODO : convert [data + 2] to Uint256
     local resource : ResourceAsset = ResourceAsset(
         [data],
         [data + 1], 
-        [data + 2]
+        id
     );
-    local owner = [data];
-    let asset_id = [data + 2];
-    assets_owned_by_this_contract.write(asset_id, resource);
+    assets_owned_by_this_contract.write(id, resource);
     return (ON_ERC1155_RECEIVED_SELECTOR);
 
+}
+
+@view
+func supportsInterface{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
+    interfaceId: felt
+) -> (success: felt) {
+    return ERC165.supports_interface(interfaceId);
 }
 
 //////
