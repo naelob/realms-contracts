@@ -26,8 +26,6 @@ from contracts.settling_game.interfaces.IERC1155 import IERC1155
 
 from openzeppelin.access.ownable.library import Ownable
 
-from openzeppelin.access.ownable.library import Ownable
-
 from openzeppelin.upgrades.library import Proxy
 
 from openzeppelin.introspection.erc165.library import ERC165
@@ -39,10 +37,12 @@ from starkware.cairo.common.bool import TRUE, FALSE
 from contracts.options_market.interfaces.IBlackScholes import IBlackScholes
 from contracts.options_market.interfaces.IExhangeAMM import IExhangeAMM
 
+//////
+//// STRUCTS ////
+//////
 
 struct CallOption {
     Writer : felt,
-    VaultAddress : felt,
     Expiration : felt,
     Strike : felt, // Uint256 ?
     Underlying : felt, // Uint256 ?
@@ -51,16 +51,26 @@ struct CallOption {
     Bid : felt, // Uint256 ?
     Winner : felt
 }
+
 struct SettleType {
     Auction : felt,
     Spot : felt
 }
 
+struct ResourceAsset {
+    Beneficiary : felt,
+    TokenAddress : felt,
+    AssetId : Uint256
+}
+
+//////
+//// EVENTS ////
+//////
+
 @event
 func CallOptionOpened(
     option_id : Uint256,
     writer : felt,
-    vault_address : felt,
     strike : felt,
     expiration_time : felt,
     token_address : felt,
@@ -114,6 +124,11 @@ func CallOptionEarningsClaimed(
     option_id : Uint256, owner_of_option_contract : felt, claimable : felt) {
 }
 
+
+//////
+//// STORAGE ////
+//////
+
 // Contract Address of ERC20 address for this swap contract
 @storage_var
 func currency_address() -> (res: felt) {
@@ -137,7 +152,7 @@ func options_contracts_list(idx : Uint256) -> (call_option : CallOption) {
 }
 
 @storage_var
-func assets_to_options(vault_address : felt, token_id : Uint256) -> (call_option : CallOption) {
+func assets_to_options(token_id : Uint256) -> (call_option : CallOption) {
 }
 
 @storage_var
@@ -164,13 +179,19 @@ func min_above_bid_alpha() -> (res: felt) {
 func black_scholes_address() -> (res: felt) {
 }
 
+@storage_var
+func assets_owned_by_this_contract(owner : felt) -> (res: ResourceAsset) {
+}
 
+
+//////
+//// CONSTRUCTOR ////
+//////
 
 @external
 func initializer{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
     proxy_admin : felt,
     currency_address_ : felt,
-    vault_address_ : felt,
     nft_contract_adress_ : felt,
     settle_type_ : felt,
     min_above_bid_alpha_ : felt,
@@ -179,7 +200,6 @@ func initializer{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr
     exchange_amm_address : felt
 ) {
     currency_address.write(currency_address_);
-    vault_address.write(vault_address_);
     nft_address.write(nft_contract_adress_);
     Proxy.initializer(proxy_admin);
     Ownable.initializer(proxy_admin);
@@ -203,7 +223,20 @@ func upgrade{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
 }
 
 
-/// Option Writer Functions ///
+//////
+//// GETTERS ////
+//////
+
+
+//////
+//// SETTERS ////
+//////
+
+
+
+//////
+//// EXTERNAL ////
+//////
 
 @external
 func write{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr} (
@@ -230,7 +263,7 @@ func write{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr} (
     let (timestamp) = get_block_timestamp();
     let twenty_four_hours = timestamp + 86400;
     assert_lt(twenty_four_hours, expiration_time);
-
+ 
     // assert that token_address is an ERC1155 and not the address of LORDS
     let (currency_address) = currency_address.read();
     assert_not_equal(currency_address, token_address);
@@ -238,15 +271,18 @@ func write{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr} (
     let (count : Uint256) = options_counter.read();
 
     let (this_address) = get_contract_address();
-    let (vault_address) = vault_address.read();
     // Transfer the ERC1155 underlying into our contract
-    local null : Uint256* = alloc();
-    IERC1155.safeTransferFrom(token_address, writer, vault_address, token_id, Uint256(1, 0), 0, null);
-    // TODO : add a check to make sure ownership of the ERC1155 is set to our vault
+    local data : Uint256* = alloc();
+    assert [data] = caller;
+    assert [data + 1] = token_address;
+    assert [data + 2] = token_id;
+
+    IERC1155.safeTransferFrom(token_address, writer, this_address, token_id, Uint256(1, 0), 3, data);
+    // TODO : add a check to make sure ownership of the ERC1155 is set to our address;
 
     // Mint an NFT ERC721 to the writer of the option
     // This ERC721 would represent the option contract held by the writer, can be traded on the NFT marketplace
-    let (nft_address) = nft_address.read()
+    let (nft_address) = nft_address.read();
     IERC721._safeMint(nft_address, writer, count, 0, null);
 
     let next_count : Uint256 = uint256_add(count, Uint256(1,0));
@@ -254,7 +290,6 @@ func write{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr} (
  
     local option_info : CallOption = CallOption(    
         caller,
-        vault_address,
         expiration_time,
         strike,
         token_address,
@@ -266,12 +301,11 @@ func write{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr} (
     options_contracts_list.write(count, option_info);
 
     // Add our option tied to the token_id of the ERC1155
-    assets_to_options.write(vault_address, token_id, option_info);
+    assets_to_options.write(token_id, option_info);
 
     CallOptionOpened.emit(
         count,
         caller,
-        vault_address,
         strike,
         expiration_time,
         token_address,
@@ -308,14 +342,14 @@ func bid{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
         assert_lt(final, bid_amount);
     }
 
-    with_attr error_message("Covered_Call :Overbid Not Sufficicient : Must Be Above Strike Price") {
+    with_attr error_message("Covered_Call : Overbid Not Sufficicient : Must Be Above Strike Price") {
         let actual_bid = option_info.Bid;
         let strike = option_info.Strike;
         assert_lt(strike_price, actual_bid);
     }
 
     _send_last_bid_to_previous_winner(option_info);
-    IVault.set_new_asset_owner(option_info.VaultAddress, option_info.AssetId, caller);
+    _set_new_asset_owner(option_info.AssetId, caller);
 
     Bid.emit(option_id, bid_amount, caller);
 
@@ -365,6 +399,7 @@ func buy{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
     IERC721.transferFrom(nft_address, owner, caller, option_id);
 
     OptionBought.emit(option_id, caller, call_option_price);
+    return ();
 }
 @external 
 func settle{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
@@ -373,7 +408,7 @@ func settle{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
     let (settle_type) = settle_type.read();
     if (settle_type == SettleType.Auction) { 
         return _settle_auction(option_id);
-    }else {
+    } else {
         return _settle_spot(option_id);
     }
 }
@@ -411,7 +446,6 @@ func reclaim_underlying{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_ch
   
     local new_option_info : CallOption = CallOption(
         option_info.Writer,
-        option_info.VaultAddress,
         option_info.Expiration,
         option_info.Strike,
         option_info.Underlying,
@@ -423,7 +457,7 @@ func reclaim_underlying{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_ch
     options_contracts_list.write(option_id, new_option_info);
 
 
-    IVault.release_underlying(option_info.VaultAddress, option_info.AssetId, option_info.Writer);
+    _release_underlying(option_info.AssetId, option_info.Writer);
 
     CallOptionReclaimed.emit(option_id);
     return ();
@@ -481,7 +515,6 @@ func burn_expired_option{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_c
     
     local new_option_info : CallOption = CallOption(
         option_info.Writer,
-        option_info.VaultAddress,
         option_info.Expiration,
         option_info.Strike,
         option_info.Underlying,
@@ -497,7 +530,81 @@ func burn_expired_option{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_c
     return ();
 }
 
-// Internal
+@external
+func onERC1155Received{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
+    operator: felt, from_: felt, id: Uint256, amount: Uint256, data_len: felt, data: felt*
+) -> (selector: felt) {
+    // receive ERC1155 token and store inside a mapping : owner => {token_address, token_id} 
+    // [data] => owner_of_asset
+    // [data + 1] => token_address
+    // [data + 2] => token_id
+
+    // TODO : convert [data + 2] to Uint256
+    local resource : ResourceAsset = ResourceAsset(
+        [data],
+        [data + 1], 
+        [data + 2]
+    );
+    local owner = [data];
+    let asset_id = [data + 2];
+    assets_owned_by_this_contract.write(asset_id, resource);
+    return (ON_ERC1155_RECEIVED_SELECTOR);
+
+}
+
+//////
+//// INTERNAL ////
+//////
+
+func _set_new_asset_owner{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
+    asset_id : Uint256, new_owner : felt
+){  
+    with_attr error_message("Covered_Call : New Owner Cannot Be Zero") {
+        assert_not_zero(new_owner);
+    }
+
+    let (resource : ResourceAsset) = assets_owned_by_this_contract.read(asset_id);
+    
+    // TODO : add a check for valid resource MUST BE DIFFERENT THAN NULL(0,0,0)
+
+    let new_resource : ResourceAsset =  ResourceAsset(
+        new_owner
+        resource.TokenAddress,
+        resource.AssetId
+    );
+    assets_owned_by_this_contract.write(asset_id, new_resource);
+    return ();
+}
+
+func _release_underlying{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
+    asset_id : Uint256, owner : felt
+){
+    alloc_locals;
+
+    with_attr error_message("Covered_Call : Owner Cannot Be Zero") {
+        assert_not_zero(owner);
+    }
+    // TODO : add a check for valid asset id
+
+    let (resource : ResourceAsset) = assets_owned_by_this_contract.read(asset_id);
+
+    // TODO : add a check for valid resource MUST BE DIFFERENT THAN NULL(0,0,0)
+
+    with_attr error_message("Covered_Call : Owner Must Own The Underlying") {
+        assert resource.Beneficiary = owner;
+    }
+    let (this_address) = get_contract_address();
+    local null : Uint256* = alloc();
+    IERC1155.safeTransferFrom(resource.TokenAddress, this_address, owner, asset_id, Uint256(1, 0), 0, null);
+
+    let null_resource : ResourceAsset = ResourceAsset(
+        0,
+        0,
+        Uint256(0,0)
+    );
+    assets_owned_by_this_contract.write(asset_id, null_resource);
+    return ();
+}
 
 func _settle_auction{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
     option_id : Uint256
@@ -523,7 +630,6 @@ func _settle_auction{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check
     // settle the option to TRUE
     local new_option_info : CallOption = CallOption(
         option_info.Writer,
-        option_info.VaultAddress,
         option_info.Expiration,
         option_info.Strike,
         option_info.Underlying,
@@ -551,6 +657,8 @@ func _settle_auction{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check
         IERC20.transferFrom(currency_address, contract, owner_of_option_contract, [spread]);
         IERC721._burn(nft_address, option_id);
         CallOptionSettledByAuction.emit(option_id);
+        // transfer ERC1155 to winner of auction
+        _transfer_asset(option_info.AssetId);
         return ();
     }
 
@@ -584,7 +692,6 @@ func _settle_spot{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_pt
     // settle the option to TRUE
     local new_option_info : CallOption = CallOption(
         option_info.Writer,
-        option_info.VaultAddress,
         option_info.Expiration,
         option_info.Strike,
         option_info.Underlying,
@@ -619,7 +726,9 @@ func _settle_spot{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_pt
         // TODO convert strike to Uint256
         IERC20.transferFrom(currency_address, owner_of_option_contract, option_info.Writer, [option_info.Strike]); 
         // give ownership of underlying ERC1155 resource to the holder of the option
-        IVault.set_new_asset_owner(option_info.VaultAddress, option_info.AssetId, caller);
+        _set_new_asset_owner(option_info.AssetId, caller);
+        // transfer ERC1155 to the beneficiary
+        _transfer_asset(option_info.AssetId);
     }
 
     // option is worthless : so we burn it ? 
@@ -627,7 +736,6 @@ func _settle_spot{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_pt
     CallOptionSettledBySpot.emit(option_id);
     return ();
 }
-
 
 func _get_spot_price{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
     asset_id : Uint256
@@ -649,6 +757,7 @@ func _send_last_bid_to_previous_winner{syscall_ptr: felt*, pedersen_ptr: HashBui
     let (this_address) = get_contract_address();
     // TODO : convert bid to Uint256
     IERC20.transferFrom(currency_address, this_address, call_option.Winner, [bid]);
+    return ();
 }
 
 func _set_market_paused{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
@@ -662,9 +771,34 @@ func _set_market_paused{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_ch
     }
     market_paused.write(TRUE);
     MarketPaused.emit(bool);
+    return ();
 }
 
-// Modifiers
+func _transfer_asset{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
+    asset_id : Uint256
+){
+    alloc_locals;
+    // TODO : add a check for valid asset id
+
+    let (resource : ResourceAsset) = assets_owned_by_this_contract.read(asset_id);
+
+    // TODO : add a check for valid resource MUST BE DIFFERENT THAN NULL(0,0,0)
+
+    let (this_address) = get_contract_address();
+    local null : Uint256* = alloc();
+    IERC1155.safeTransferFrom(resource.TokenAddress, this_address, resource.Beneficiary, asset_id, Uint256(1, 0), 0, null);
+
+    let null_resource : ResourceAsset = ResourceAsset(
+        0,
+        0,
+        Uint256(0,0)
+    );
+    assets_owned_by_this_contract.write(asset_id, null_resource);
+    return ();
+}
+//////
+//// MODIFIERS ////
+//////
 
 func assert_bid_is_enabled{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
     option_id : Uint256
@@ -688,7 +822,6 @@ func assert_bid_is_enabled{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range
         assert is_settled == FALSE;
     }
 }   
-
 func assert_not_paused{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
 ) -> (paused : felt){
     let (paused) = market_paused.read();
