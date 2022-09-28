@@ -20,6 +20,7 @@ from starkware.cairo.common.uint256 import (
     uint256_eq,
 )
 from openzeppelin.token.erc20.IERC20 import IERC20
+from openzeppelin.token.erc721.IERC721 import IERC721
 
 from contracts.settling_game.interfaces.IERC1155 import IERC1155
 
@@ -35,6 +36,7 @@ from contracts.token.library import ERC1155
 
 struct CallOption {
     Writer : felt,
+    VaultAddress : felt,
     Expiration : felt,
     Strike : felt,
     Premium : felt,
@@ -46,6 +48,7 @@ struct CallOption {
 func CallOptionOpened(
     option_id : felt,
     writer : felt,
+    vault_address : felt,
     strike : felt,
     expiration_time : felt,
     token_address : felt,
@@ -64,12 +67,22 @@ func underlying_token_address() -> (res: felt) {
 }
 
 @storage_var
+func nft_address() -> (res: felt) {
+}
+
+
+@storage_var
 func options_counter() -> (res: felt) {
 }
 
 @storage_var
 func options_contracts_list(idx : felt) -> (call_option : CallOption) {
 }
+
+@storage_var
+func assets_to_options(vault_address : felt, token_id : felt) -> (call_option : CallOption) {
+}
+
 
 @storage_var
 func market_paused() -> (bool: felt) {
@@ -79,9 +92,13 @@ func market_paused() -> (bool: felt) {
 @external
 func initializer{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
     proxy_admin : felt,
-    currency_address_ : felt
+    currency_address_ : felt,
+    vault_address_ : felt,
+    nft_contract_adress_ : felt
 ) {
     currency_address.write(currency_address_);
+    vault_address.write(vault_address_);
+    nft_address.write(nft_contract_adress_);
     Proxy.initializer(proxy_admin);
     Ownable.initializer(proxy_admin);
     market_paused.write(FALSE);
@@ -123,23 +140,44 @@ func write{} (
     let (currency_address) = currency_address.read();
     assert_not_equal(currency_address, token_address);
 
-    let (count) = options_counter.read()
+    let (count) = options_counter.read();
+
+    // TODO : determine the right premium price for the ERC1155 being sent into the contract
+
+    let (this_address) = get_contract_address();
+    let (vault_address) = vault_address.read();
+    // Transfer the ERC1155 underlying into our contract
+    IERC1155.safeTransferFrom(token_address, writer, vault_address, token_id, 1, 0, [0]);
+    // TODO : add a check to make sure ownership of the ERC1155 is set to our vault
+
+    // Mint an NFT ERC721 to the writer of the option
+    // This ERC721 would represent the option contract held by the writer, can be traded on the NFT marketplace
+    let (nft_address) = nft_address.read()
+    IERC721._safeMint(nft_address, writer, count, 0, [0]);
+
+    
     options_counter.write(count + 1);
 
     // add the new option contract to the opened contracts list
     local option_info : CallOption = CallOption(
         caller,
+        vault_address,
         expiration_time,
         strike,
         ,
         token_address,
         token_id
     );
+
     options_contracts_list.write(count, option_info);
+
+    // Add our option tied to the token_id of the ERC1155
+    assets_to_options.write(vault_address, token_id, option_info);
 
     CallOptionOpened.emit(
         count,
         caller,
+        vault_address,
         strike,
         expiration_time,
         token_address,
