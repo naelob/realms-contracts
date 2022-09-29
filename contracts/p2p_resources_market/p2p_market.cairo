@@ -1,9 +1,8 @@
 %lang starknet
 %builtins pedersen range_check bitwise
 
-from starkware.cairo.common.cairo_builtins import HashBuiltin, SignatureBuiltin, BitwiseBuiltin
+from starkware.cairo.common.cairo_builtins import HashBuiltin, BitwiseBuiltin
 from starkware.cairo.common.alloc import alloc
-from starkware.starknet.common.messages import send_message_to_l1
 from starkware.starknet.common.syscalls import (
     get_caller_address,
     get_contract_address,
@@ -61,7 +60,6 @@ struct ResourcesNeeded {
     MIN_ADAMANTINE : Uint256,
     MIN_MITHRAL : Uint256,
     MIN_DRAGONHIDE : Uint256,
-
 }
 
 struct Trade {
@@ -106,6 +104,7 @@ func _trades(idx: felt) -> (trade: Trade) {
 func trade_counter() -> (value: felt) {
 }
 
+// Address of the ERC1155 contract
 @storage_var
 func asset_address() -> (res: felt) {
 }
@@ -119,10 +118,10 @@ func constructor{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr
     proxy_admin : felt,
     asset_token : felt
 ) {
-    asset_address.write(asset_token);
-    trade_counter.write(1);
     Proxy.initializer(proxy_admin);    
     Ownable.initializer(proxy_admin);
+    asset_address.write(asset_token);
+    trade_counter.write(1);
     return ();
 }
 
@@ -131,7 +130,7 @@ func constructor{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr
 //##################
 
 @external
-func open_escrow{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
+func open_trade{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
     _token_ids_len : felt, 
     _token_ids: Uint256*, 
     _token_amounts_len : felt,
@@ -142,10 +141,12 @@ func open_escrow{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr
 ) {
     alloc_locals;
     Pausable.assert_not_paused();
+
     let (caller) = get_caller_address();
     let (contract_address) = get_contract_address();
     
     let (asset_address) = asset_address.read();
+
     // TODO 
     _assert_ownership(_token_ids_len, _token_ids, );
 
@@ -158,7 +159,6 @@ func open_escrow{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr
     let (trade_count) = trade_counter.read();
     
     assert owner_of = caller;
-    assert is_approved = 1;
 
     local needs : ResourcesNeeded = _get_needs(_resources_needed);
 
@@ -173,10 +173,12 @@ func open_escrow{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr
         needs,
         _expiration
     );
+
     _trades.write(trade_count, trade);
 
     // increment
     trade_counter.write(trade_count + 1);
+
     TradeOpened.emit(trade);
 
     return ();
@@ -191,13 +193,19 @@ func execute_trade{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_p
 
     let (caller) = get_caller_address();
     let (this_address) = get_contract_address();
+
     let (trade) = _trades.read(_trade_id);
         
+    // address of ERC1155
     let (token_address) = asset_address.read();
 
-    assert trade.status = TradeStatus.Open;
+    with_attr error_message("P2P_Market : Trade Not Opened") {
+        assert trade.status = TradeStatus.Open;
+    }
 
-    assert_time_in_range(_trade_id);    
+    with_attr error_message("P2P_Market : Expiration Issue") {
+        assert_time_in_range(_trade_id);    
+    }
 
     _check_if_party_owns_needs(trade.needs, caller);
     
@@ -240,11 +248,11 @@ func execute_trade{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_p
         null
     );
 
-    local asset_ids_ : felt* = alloc();
-    local index_i = 1;
-    let (local ids : felt*) = _asset_ids_loop{
+    local asset_ids_ : Uint256* = alloc();
+    local index_i : Uint256 = Uint256(1,0);
+    let (local ids : Uint256*) = _asset_ids_loop{
         syscall_ptr=syscall_ptr, pedersen_ptr=pedersen_ptr, range_check_ptr=range_check_ptr, start=index_i
-    }(asset_ids_len);
+    }(asset_ids_);
 
     local asset_amounts : Uint256* = alloc();
     let (local amounts : Uint256*) = _asset_amounts_loop(asset_amounts, trade.needs);
@@ -288,9 +296,14 @@ func cancel_trade{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_pt
     Pausable.assert_not_paused();
     let (trade) = _trades.read(_trade_id);
 
-    assert trade.status = TradeStatus.Open;
+    with_attr error_message("P2P_Market : Trade Not Opened") {
+        assert trade.status = TradeStatus.Open;
+    }
 
-    assert_time_in_range(_trade);
+    with_attr error_message("P2P_Market : Expiration Issue") {
+        assert_time_in_range(_trade_id);    
+    }
+
     local cancelled_trade : Trade = Trade(
         trade.owner,
         trade.asset_contract,
@@ -312,8 +325,7 @@ func cancel_trade{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_pt
 func onERC1155Received{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
     operator: felt, from_: felt, id: Uint256, amount: Uint256, data_len: felt, data: felt*
 ) -> (selector: felt) {
-
-    return (ON_ERC1155_RECEIVED_SELECTOR);
+    return (selector=ON_ERC1155_RECEIVED_SELECTOR);
 }
 
 @external
@@ -326,10 +338,8 @@ func onERC1155BatchReceived(
     amounts: Uint256*,
     data_len: felt,
     data: felt*,
-) -> (selector: felt) {
-    
-    return (ON_ERC1155_BATCH_RECEIVED_SELECTOR);
-
+) -> (selector: felt) { 
+    return (selector=ON_ERC1155_BATCH_RECEIVED_SELECTOR);
 }
 
 @view
@@ -347,7 +357,7 @@ func assert_time_in_range{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_
     _trade_id : felt
 ) {
     let (block_timestamp) = get_block_timestamp();
-    let (trade) = _trades.read(_trade);
+    let (trade) = _trades.read(_trade_id);
     // check trade within
     assert_nn_le(block_timestamp, trade.expiration);
 
@@ -422,9 +432,11 @@ func unpause{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}() 
 //// INTERNAL
 ///
 
+// convert an array of min_resources to a struct
 func _get_needs{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
-    _resources_needed : felt*
+    _resources_needed : Uint256*
 ) -> (struct : ResourcesNeeded){  
+    alloc_locals;
 
     local res : ResourcesNeeded = ResourcesNeeded(
         [_resources_needed],
@@ -475,7 +487,7 @@ func _check_if_party_owns_needs{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, 
     local index_i = Uint256(1,0);
     let (local ids : Uint256*) = _asset_ids_loop{
         syscall_ptr=syscall_ptr, pedersen_ptr=pedersen_ptr, range_check_ptr=range_check_ptr, start=index_i
-    }(asset_ids_len);
+    }(asset_ids_);
 
     let (balance_len : felt, balance : Uint256*) = IERC1155.balanceOfBatch(token_address, 1, [caller], 22, ids);
 
@@ -483,8 +495,9 @@ func _check_if_party_owns_needs{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, 
     return ();
 }
 
+// Check if opposite Party owns at least the MIN_Resources wanted by the initial writer of the swap
 func _assert_amounts{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
-    start=0, amounts : Uint256*, balance : Uint256*
+    start : felt, amounts : Uint256*, balance : Uint256*
 ) { 
     if (start == 22) {
         return ();
@@ -492,7 +505,7 @@ func _assert_amounts{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check
     with_attr error_message("P2P_Market : Error Inside Asserting Needs Amounts") {
         uint256_le([amounts], [balance]);
     }
-    return _assert_amounts(start=start+1, amounts=amounts + Uint256.SIZE, balance=balance+ Uint256.SIZE);
+    return _assert_amounts(start=start+1, amounts=amounts + Uint256.SIZE, balance=balance + Uint256.SIZE);
 }
 
 // returns an array [1....22]
