@@ -142,13 +142,15 @@ func open_trade{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}
     alloc_locals;
     Pausable.assert_not_paused();
 
+    assert _token_ids_len = _token_amounts_len;
+
     let (caller) = get_caller_address();
     let (contract_address) = get_contract_address();
     
     let (asset_address) = asset_address.read();
 
-    // TODO 
-    _assert_ownership(_token_ids_len, _token_ids, );
+    // Make sure caller owns the RERC1155 assets
+    _assert_ownership(_token_ids_len, _token_ids, _token_amounts_len, _token_amounts);
 
     // check if expiration is valid
     let (block_timestamp) = get_block_timestamp();
@@ -466,11 +468,13 @@ func _get_needs{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}
 }
 
 func _assert_ownership{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
-    _token_ids_len, _token_ids, 
+    _token_ids_len : felt, _token_ids : Uint256*, _token_amounts_len : felt, _token_amounts : Uint256*
 ) {
-    // TODO 
-    let (owner_of) = IERC721.ownerOf(_token_contract, _token_id);
-    let (is_approved) = IERC721.isApprovedForAll(_token_contract, caller, contract_address);
+    // ERC1155 contract address
+    let (token_address) = asset_address.read();
+    let (balance_len : felt, balance : Uint256*) = IERC1155.balanceOfBatch(token_address, 1, [caller], _token_ids_len, _token_ids);
+    _assert_amounts(start=0, amounts=_token_amounts, balance=balance);
+    return ();
 }
  
 func _check_if_party_owns_needs{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
