@@ -472,7 +472,7 @@ func _assert_ownership{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_che
     let (owner_of) = IERC721.ownerOf(_token_contract, _token_id);
     let (is_approved) = IERC721.isApprovedForAll(_token_contract, caller, contract_address);
 }
-
+ 
 func _check_if_party_owns_needs{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
     needs : ResourcesNeeded, caller : felt
 ){
