@@ -22,8 +22,11 @@ from openzeppelin.introspection.erc165.library import ERC165
 from openzeppelin.access.ownable.library import Ownable
 
 from openzeppelin.security.pausable.library import Pausable
-from contracts.settling_game.utils.general import scale, unpack_data
 
+from contracts.token.constants import (
+    ON_ERC1155_RECEIVED_SELECTOR,
+    ON_ERC1155_BATCH_RECEIVED_SELECTOR,
+)
 
 //
 // STRUCTS
@@ -36,28 +39,29 @@ namespace SwapStatus {
 }
 
 struct ResourcesNeeded {
-    MIN_WOOD : felt,
-    MIN_STONE : felt,
-    MIN_COAL : felt,
-    MIN_COPPER : felt,
-    MIN_OBSIDIAN : felt,
-    MIN_SILVER : felt,
-    MIN_IRONWOOD : felt,
-    MIN_COLD_IRON : felt,
-    MIN_GOLD : felt,
-    MIN_HARTWOOD : felt,
-    MIN_DIAMONDS : felt,
-    MIN_SAPPHIRE : felt,
-    MIN_RUBY : felt,
-    MIN_DEEP_CRYSTAL : felt,
-    MIN_IGNUM : felt,
-    MIN_ETHEREAL_SILICA : felt,
-    MIN_TRUE_ICE : felt,
-    MIN_TWILIGHT_QUARTZ : felt,
-    MIN_ALCHEMICAL_SILVER : felt,
-    MIN_ADAMANTINE : felt,
-    MIN_MITHRAL : felt,
-    MIN_DRAGONHIDE : felt,
+    MIN_WOOD : Uint256,
+    MIN_STONE : Uint256,
+    MIN_COAL : Uint256,
+    MIN_COPPER : Uint256,
+    MIN_OBSIDIAN : Uint256,
+    MIN_SILVER : Uint256,
+    MIN_IRONWOOD : Uint256,
+    MIN_COLD_IRON : Uint256,
+    MIN_GOLD : Uint256,
+    MIN_HARTWOOD : Uint256,
+    MIN_DIAMONDS : Uint256,
+    MIN_SAPPHIRE : Uint256,
+    MIN_RUBY : Uint256,
+    MIN_DEEP_CRYSTAL : Uint256,
+    MIN_IGNUM : Uint256,
+    MIN_ETHEREAL_SILICA : Uint256,
+    MIN_TRUE_ICE : Uint256,
+    MIN_TWILIGHT_QUARTZ : Uint256,
+    MIN_ALCHEMICAL_SILVER : Uint256,
+    MIN_ADAMANTINE : Uint256,
+    MIN_MITHRAL : Uint256,
+    MIN_DRAGONHIDE : Uint256,
+
 }
 
 struct Trade {
@@ -65,7 +69,7 @@ struct Trade {
     asset_contract: felt,
     asset_ids: Uint256*,
     asset_ids_len : felt,
-    asset_amounts : felt*,
+    asset_amounts : Uint256*,
     asset_amounts_len : felt,
     status: felt,  // from SwapStatus
     needs : ResourcesNeeded,
@@ -131,7 +135,7 @@ func open_escrow{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr
     _token_ids_len : felt, 
     _token_ids: Uint256*, 
     _token_amounts_len : felt,
-    _token_amounts : felt*, 
+    _token_amounts : Uint256*, 
     _resources_needed_len ; felt,
     _resources_needed ; felt*,
     _expiration : felt
@@ -145,11 +149,10 @@ func open_escrow{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr
     // TODO 
     _assert_ownership(_token_ids_len, _token_ids, );
 
+    // check if expiration is valid
     let (block_timestamp) = get_block_timestamp();
-    let (trade) = _trades.read(_trade);
-    // check trade within
     with_attr error_message("P2P_Market : Expiration Is Not Valid") {
-        assert_nn_le(block_timestamp, trade.expiration);
+        assert_nn_le(block_timestamp, expiration);
     }
     
     let (trade_count) = trade_counter.read();
@@ -185,41 +188,94 @@ func execute_trade{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_p
 ) {
     alloc_locals;
     Pausable.assert_not_paused();
-    let (currency) = currency_token_address.read();
 
     let (caller) = get_caller_address();
-    let (_treasury_address) = treasury_address.read();
-    let (trade) = _trades.read(_trade);
-    let (fee_bips) = protocol_fee_bips.read();
+    let (this_address) = get_contract_address();
+    let (trade) = _trades.read(_trade_id);
+        
+    let (token_address) = asset_address.read();
 
     assert trade.status = TradeStatus.Open;
 
-    assert_time_in_range(_trade);
+    assert_time_in_range(_trade_id);    
 
-    // Fee is paid by seller
-    let (fee, remainder) = unsigned_div_rem(trade.price * fee_bips, 10000);
-    let base_seller_receives = trade.price - fee;
-
-    // transfer to poster
-    IERC20.transferFrom(currency, caller, trade.poster, Uint256(base_seller_receives, 0));
-
-    // transfer to treasury
-    IERC20.transferFrom(currency, caller, _treasury_address, Uint256(fee, 0));
-
-    // transfer item to buyer
-    IERC721.transferFrom(trade.token_contract, trade.poster, caller, trade.token_id);
-
-    write_trade(
-        _trade,
-        Trade(
-        trade.token_contract,
-        trade.token_id,
-        trade.expiration,
-        trade.price,
-        trade.poster,
-        TradeStatus.Executed,
-        _trade),
+    _check_if_party_owns_needs(trade.needs, caller);
+    
+    // transfer items to contract
+    IERC1155.safeBatchTransferFrom(
+        token_address, 
+        trade.owner, 
+        this_address, 
+        trade.asset_ids_len,
+        trade.asset_ids,
+        trade.asset_amounts_len,
+        trade.asset_amounts,
+        0, 
+        null
     );
+
+    local null : felt* = alloc();
+
+    onERC1155BatchReceived(
+        caller, 
+        trade.owner,
+        trade.asset_ids_len,
+        trade.asset_ids,
+        trade.asset_amounts_len,
+        trade.asset_amounts,
+        0, 
+        null
+    );
+
+    // transfer items to buyer
+    IERC1155.safeBatchTransferFrom(
+        token_address, 
+        this_address, 
+        caller, 
+        trade.asset_ids_len,
+        trade.asset_ids,
+        trade.asset_amounts_len,
+        trade.asset_amounts,
+        0, 
+        null
+    );
+
+    local asset_ids_ : felt* = alloc();
+    local index_i = 1;
+    let (local ids : felt*) = _asset_ids_loop{
+        syscall_ptr=syscall_ptr, pedersen_ptr=pedersen_ptr, range_check_ptr=range_check_ptr, start=index_i
+    }(asset_ids_len);
+
+    local asset_amounts : Uint256* = alloc();
+    let (local amounts : Uint256*) = _asset_amounts_loop(asset_amounts, trade.needs);
+
+    // transfer buyer's goods (what the writer of the swap actually needs in exchange) to creator of swap
+    IERC1155.safeBatchTransferFrom(
+        token_address, 
+        caller, 
+        trade.owner, 
+        22,
+        ids,
+        22,
+        amounts,
+        0, 
+        null
+    );
+
+    local trade_executed : Trade = Trade(
+        trade.owner,
+        trade.asset_contract,
+        trade.asset_ids,
+        trade.asset_ids_len,
+        trade.asset_amounts,
+        trade.asset_amounts_len,
+        TradeStatus.Executed,
+        trade.needs,
+        trade.expiration
+    );
+    _trades.write(_trade_id, trade_executed);
+
+    TradeExecuted.emit(_trade_id, caller);
 
     return ();
 }
@@ -252,6 +308,37 @@ func cancel_trade{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_pt
     return ();
 }
 
+@external
+func onERC1155Received{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
+    operator: felt, from_: felt, id: Uint256, amount: Uint256, data_len: felt, data: felt*
+) -> (selector: felt) {
+
+    return (ON_ERC1155_RECEIVED_SELECTOR);
+}
+
+@external
+func onERC1155BatchReceived(
+    operator: felt,
+    from_: felt,
+    ids_len: felt,
+    ids: Uint256*,
+    amounts_len: felt,
+    amounts: Uint256*,
+    data_len: felt,
+    data: felt*,
+) -> (selector: felt) {
+    
+    return (ON_ERC1155_BATCH_RECEIVED_SELECTOR);
+
+}
+
+@view
+func supportsInterface{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
+    interface_id: felt
+) -> (success: felt) {
+    return ERC165.supports_interface(interface_id);
+} 
+
 ////
 // MODIFIERS
 ///
@@ -275,12 +362,15 @@ func _uint_to_felt{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_p
     return (value.high * (2 ** 128) + value.low,);
 }
 
+
 //##########
 // GETTERS #
 //##########
 
 @view
-func get_trade{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(idx: felt) -> (
+func get_trade{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
+    idx: felt
+) -> (
     trade: Trade
 ) {
     return _trades.read(idx);
@@ -299,37 +389,20 @@ func get_trade_status{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_chec
     idx: felt
 ) -> (status: felt) {
     let (trade) = _trades.read(idx);
-    return (trade.status,);
-}
-
-// Returns a trades token
-@view
-func get_trade_token_id{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
-    idx: felt
-) -> (token_id: Uint256) {
-    let (trade) = _trades.read(idx);
-    return (trade.token_id,);
+    return (trade.status);
 }
 
 @view
-func paused{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}() -> (paused: felt) {
+func paused{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}() -> (
+    paused: felt
+) {
     let (paused) = Pausable.is_paused();
-    return (paused,);
+    return (paused);
 }
 
-//##########
-// SETTERS #
-//##########
-
-// Set basis points
-@external
-func set_basis_points{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
-    basis_points: felt
-) -> (success: felt) {
-    Ownable.assert_only_owner();
-    protocol_fee_bips.write(basis_points);
-    return (1,);
-}
+//
+// SETTERS 
+//
 
 @external
 func pause{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}() {
@@ -387,3 +460,83 @@ func _assert_ownership{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_che
     let (owner_of) = IERC721.ownerOf(_token_contract, _token_id);
     let (is_approved) = IERC721.isApprovedForAll(_token_contract, caller, contract_address);
 }
+
+func _check_if_party_owns_needs{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
+    needs : ResourcesNeeded, caller : felt
+){
+    alloc_locals;
+    // ERC1155 contract address
+    let (token_address) = asset_address.read();
+
+    local asset_amounts : Uint256* = alloc();
+    let (local amounts : Uint256*) = _asset_amounts_loop(asset_amounts, trade.needs);
+
+    local asset_ids_ : Uint256* = alloc();
+    local index_i = Uint256(1,0);
+    let (local ids : Uint256*) = _asset_ids_loop{
+        syscall_ptr=syscall_ptr, pedersen_ptr=pedersen_ptr, range_check_ptr=range_check_ptr, start=index_i
+    }(asset_ids_len);
+
+    let (balance_len : felt, balance : Uint256*) = IERC1155.balanceOfBatch(token_address, 1, [caller], 22, ids);
+
+    _assert_amounts(start=0, amounts=amounts, balance=balance);
+    return ();
+}
+
+func _assert_amounts{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
+    start=0, amounts : Uint256*, balance : Uint256*
+) { 
+    if (start == 22) {
+        return ();
+    }
+    with_attr error_message("P2P_Market : Error Inside Asserting Needs Amounts") {
+        uint256_le([amounts], [balance]);
+    }
+    return _assert_amounts(start=start+1, amounts=amounts + Uint256.SIZE, balance=balance+ Uint256.SIZE);
+}
+
+// returns an array [1....22]
+func _asset_ids_loop{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr, start : Uint256}(
+    assets_ids : Uint256*
+) -> (res : Uint256*){
+    let (bool) = uint256_eq(start, Uint256(23,0));
+    if (bool == 1) {
+        return (res=assets_ids);
+    }
+    assert [assert_ids] = start;
+    local new_start = uint256_add(start, Uint256(1,0));
+    return _asset_ids_loop{
+        syscall_ptr=syscall_ptr, pedersen_ptr=pedersen_ptr, range_check_ptr=range_check_ptr, start=new_start
+    }(assets_ids=assets_ids + Uint256.SIZE);
+}
+
+// returns an array with the amounts matching the struct ResourceNeeded
+func _asset_amounts_loop{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
+    assets_amounts : Uint256*, needs : ResourcesNeeded
+) -> (res : Uint256*){
+  
+    assert [assets_amounts] = needs.MIN_WOOD;
+    assert [assets_amounts + 1 * Uint256.SIZE] = needs.MIN_STONE;
+    assert [assets_amounts + 2 * Uint256.SIZE] = needs.MIN_COAL;
+    assert [assets_amounts + 3 * Uint256.SIZE] = needs.MIN_COPPER;
+    assert [assets_amounts + 4 * Uint256.SIZE] = needs.MIN_OBSIDIAN;
+    assert [assets_amounts + 5 * Uint256.SIZE] = needs.MIN_IRONWOOD;
+    assert [assets_amounts + 6 * Uint256.SIZE] = needs.MIN_COLD_IRON;
+    assert [assets_amounts + 7 * Uint256.SIZE] = needs.MIN_GOLD;
+    assert [assets_amounts + 8 * Uint256.SIZE] = needs.MIN_HARTWOOD;
+    assert [assets_amounts + 9 * Uint256.SIZE] = needs.MIN_DIAMONDS;
+    assert [assets_amounts + 10 * Uint256.SIZE] = needs.MIN_SAPPHIRE;
+    assert [assets_amounts + 11 * Uint256.SIZE] = needs.MIN_RUBY; 
+    assert [assets_amounts + 12 * Uint256.SIZE] = needs.MIN_DEEP_CRYSTAL; 
+    assert [assets_amounts + 13 * Uint256.SIZE] = needs.MIN_IGNUM;
+    assert [assets_amounts + 14 * Uint256.SIZE] = needs.MIN_ETHEREAL_SILICA;
+    assert [assets_amounts + 15 * Uint256.SIZE] = needs.MIN_TRUE_ICE;
+    assert [assets_amounts + 16 * Uint256.SIZE] = needs.MIN_TWILIGHT_QUARTZ;
+    assert [assets_amounts + 17 * Uint256.SIZE] = needs.MIN_ALCHEMICAL_SILVER;
+    assert [assets_amounts + 18 * Uint256.SIZE] = needs.MIN_ADAMANTINE;
+    assert [assets_amounts + 19 * Uint256.SIZE] = needs.MIN_MITHRAL;
+    assert [assets_amounts + 20 * Uint256.SIZE] = needs.MIN_DRAGONHIDE;
+    
+    return (res=assets_amounts);
+}
+

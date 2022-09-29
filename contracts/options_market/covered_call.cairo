@@ -37,6 +37,12 @@ from starkware.cairo.common.bool import TRUE, FALSE
 from contracts.options_market.interfaces.IBlackScholes import IBlackScholes
 from contracts.options_market.interfaces.IExhangeAMM import IExhangeAMM
 
+from contracts.token.constants import (
+    ON_ERC1155_RECEIVED_SELECTOR,
+    ON_ERC1155_BATCH_RECEIVED_SELECTOR,
+)
+
+
 //////
 //// STRUCTS ////
 //////
